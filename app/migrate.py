@@ -28,10 +28,26 @@ def log(*a):
 
 
 # ------------------------------------------------------------------ helpers
+_MOJI = ("Ã", "Â", "â€")
+
+
+def fix_mojibake(s):
+    """UTF-8 text that was saved/read as Windows-1252 (e.g. 'SocietÃ ' -> 'Società')."""
+    if s and any(m in s for m in _MOJI):
+        try:
+            return s.encode("cp1252").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            try:
+                return s.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                return s
+    return s
+
+
 def clean(s):
     if s is None:
         return ""
-    return str(s).strip()
+    return fix_mojibake(str(s)).strip()
 
 
 def is_deleted(v):
@@ -892,7 +908,7 @@ class Migration:
                 self.objects[-1].append(iso(opened))
             cid = self.contact_map.get(clean(r.get("id_contatto")))
             if not cid:
-                m = re.match(r"\s*(?:da|from)\s*:\s*(\S+@\S+)", clean(r.get("descrizione")), re.I)
+                m = re.search(r"(?:^|\n)\s*(?:segnalato\s+da|scritto\s+da|inviato\s+da|da|from)\s*:\s*<?([^\s<>]+@[^\s<>]+)", clean(r.get("descrizione")), re.I)
                 if m:
                     e = norm_email(m.group(1))
                     cid = self.email_to_contact.get(e) if e else None

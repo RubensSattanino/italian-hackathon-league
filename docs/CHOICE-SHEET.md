@@ -56,9 +56,16 @@
 - **Where**: `opportunita.csv.data_chiusura` together with `storico_fasi.csv`.
 - **How we handled it**: the close date is the date the deal entered its final stage in the stage history.
 
-**Case: Tickets without a contact but with a "Da: <email>" header**
-- **Where**: `ticket.csv.descrizione`.
-- **How many rows**: 456 tickets are linked to their contact this way.
+**Case: Broken accents (UTF-8 read as Windows-1252)**
+- **Where**: `aziende.csv` (`ragione_sociale`, `citta`), `contatti.csv` (`nome`, `cognome`), `ticket.csv` (`oggetto`, `descrizione`).
+- **How it's written**: `SocietÃ  Arredi Bassi`, `CantÃ¹`, `NiccolÃ²`, `DÃ©bora`.
+- **How many rows**: about 5,000 values.
+- **What our CRM does**: re-decodes these values (cp1252 → UTF-8), giving `Società`, `Cantù`, `Niccolò`, so names arrive as people wrote them.
+
+**Case: Ticket reporter written in the description**
+- **Where**: `ticket.csv.descrizione` when `id_contatto` is empty.
+- **How it's written**: `Da: m.leone@cortimetalli.com` or `Segnalato da: federica.bruno283@libero.it` on the first line.
+- **What our CRM does**: links the ticket to the contact with that email (857 tickets).
 
 **Case: Duplicate activities**
 - **Where**: `attivita.csv`. The same type, date, text, contact and deal appear under two ids.
