@@ -226,17 +226,49 @@ async def products(req):
     return await run_in_threadpool(work)
 
 
+_ui_calls = []
+
+
+async def ui_agent(req):
+    import time as _t
+    from . import agent
+    from starlette.responses import JSONResponse
+    now = _t.time()
+    _ui_calls[:] = [x for x in _ui_calls if now - x < 3600]
+    if len(_ui_calls) >= 60:
+        return JSONResponse({"reply": "Too many assistant requests from the web UI in the last hour, try again later."}, 429)
+    _ui_calls.append(now)
+    try:
+        body = await req.json()
+    except Exception:
+        return JSONResponse({"reply": "Invalid request"}, 400)
+    reply = await run_in_threadpool(agent.run, body)
+    return JSONResponse({"reply": reply})
+
+
 async def assistant(req):
-    return page("Assistant", """<h1>Assistant</h1><div class="s" style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap"><input id="tok" type="password" placeholder="API token" style="width:220px"><input id="user" placeholder="you@brambillaforniture.it" style="width:280px"></div>
-<div id="chat"></div><form id="f" class="s" style="margin-top:10px"><input id="m" style="flex:1;min-width:260px" placeholder="Ask in Italian, e.g. Quanto abbiamo fatturato con … nel 2025?"><button>Send</button></form>
+    def users():
+        out = []
+        for (js,) in store.rconn().execute("SELECT json FROM owners ORDER BY id"):
+            o = json.loads(js)
+            if not o.get("archived"):
+                out.append(o)
+        return out
+    us = await run_in_threadpool(users)
+    opts = "".join(f'<option value="{html.escape(o["email"])}">{html.escape(o["firstName"] + " " + o["lastName"])} · {html.escape(o["email"])}</option>' for o in us)
+    if not opts:
+        opts = '<option value="">(no users yet: run the migration first)</option>'
+    return page("Assistant", f"""<h1>Assistant</h1><p class="muted">Ask in Italian, as a Brambilla sales rep would. The assistant reads and updates the CRM.</p>
+<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center"><span class="muted">Writing as</span><select id="user" style="min-width:320px">{opts}</select></div>
+<div id="chat"></div><form id="f" class="s" style="margin-top:10px"><input id="m" style="flex:1;min-width:260px" placeholder="e.g. Quanto abbiamo fatturato con Officine Farina nel 2025?"><button>Send</button></form>
 <script>
 const msgs=[];const chat=document.getElementById('chat');
-try{tok.value=localStorage.getItem('tok')||'';user.value=localStorage.getItem('user')||''}catch(e){}
-function add(r,t){const d=document.createElement('div');d.className='msg '+(r=='user'?'u':'a');d.textContent=t;chat.appendChild(d);chat.scrollTop=1e9}
-f.onsubmit=async ev=>{ev.preventDefault();const t=m.value.trim();if(!t)return;m.value='';try{localStorage.setItem('tok',tok.value);localStorage.setItem('user',user.value)}catch(e){}
-msgs.push({role:'user',content:t});add('user',t);add('assistant','…');
-const r=await fetch('/__agente',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok.value},body:JSON.stringify({context:{now:new Date().toISOString(),user:user.value},messages:msgs})});
-const j=await r.json().catch(()=>({reply:'Error '+r.status}));chat.lastChild.remove();const rep=j.reply||j.message||('Error '+r.status);msgs.push({role:'assistant',content:rep});add('assistant',rep)}
+try{{const u=localStorage.getItem('user');if(u)user.value=u}}catch(e){{}}
+function add(r,t){{const d=document.createElement('div');d.className='msg '+(r=='user'?'u':'a');d.textContent=t;chat.appendChild(d);chat.scrollTop=1e9}}
+f.onsubmit=async ev=>{{ev.preventDefault();const t=m.value.trim();if(!t)return;m.value='';try{{localStorage.setItem('user',user.value)}}catch(e){{}}
+msgs.push({{role:'user',content:t}});add('user',t);add('assistant','…');
+const r=await fetch('/ui/agent',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{context:{{now:new Date().toISOString(),user:user.value}},messages:msgs}})}});
+const j=await r.json().catch(()=>({{reply:'Error '+r.status}}));chat.lastChild.remove();const rep=j.reply||('Error '+r.status);msgs.push({{role:'assistant',content:rep}});add('assistant',rep)}}
 </script>""", "assistant")
 
 
@@ -247,4 +279,4 @@ async def home(req):
 def routes():
     return [Route("/", home), Route("/companies", companies), Route("/companies/{id}", company), Route("/contacts", contacts),
             Route("/deals", deals), Route("/tickets", tickets), Route("/dormant", dormant), Route("/products", products),
-            Route("/assistant", assistant)]
+            Route("/assistant", assistant), Route("/ui/agent", ui_agent, methods=["POST"])]
