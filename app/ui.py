@@ -1,4 +1,4 @@
- """Minimal server-rendered UI (English)."""
+"""Minimal server-rendered UI (English)."""
 import html
 import json
 from urllib.parse import urlencode
@@ -265,7 +265,7 @@ async def assistant(req):
 let msgs=[];const chat=document.getElementById('chat');
 try{{const u=localStorage.getItem('user');if(u)user.value=u}}catch(e){{}}
 function esc(t){{return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}
-function md(t){{return esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/(^|\\n)[-*] /g,'$1• ')}}
+function md(t){{return esc(t).replace(/\\*\\*(.+?)\\*\\*/g,'<b>$1</b>').replace(/(^|\\n)[-*] /g,'$1• ')}}
 function save(){{try{{sessionStorage.setItem('chat',JSON.stringify(msgs))}}catch(e){{}}}}
 function add(r,t){{const d=document.createElement('div');d.className='msg '+(r=='user'?'u':'a');if(r=='user')d.textContent=t;else d.innerHTML=md(t);chat.appendChild(d);chat.scrollTop=1e9}}
 f.onsubmit=async ev=>{{ev.preventDefault();const t=m.value.trim();if(!t)return;m.value='';try{{localStorage.setItem('user',user.value)}}catch(e){{}}

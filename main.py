@@ -12,8 +12,15 @@ try:
     from app import ui
     ui_routes = ui.routes()
 except Exception as e:  # pragma: no cover
-    print("UI disabled:", e)
-    ui_routes = []
+    import traceback
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    _ui_err = traceback.format_exc()
+    print("UI disabled:", _ui_err, flush=True)
+
+    async def _ui_broken(request):
+        return PlainTextResponse("UI failed to load (the API still works):\n\n" + _ui_err, status_code=500)
+    ui_routes = [Route(p, _ui_broken) for p in ("/", "/companies", "/contacts", "/deals", "/tickets", "/dormant", "/products", "/assistant")]
 
 
 async def not_found(request, exc):
