@@ -1,4 +1,4 @@
-"""Minimal server-rendered UI (English)."""
+ """Minimal server-rendered UI (English)."""
 import html
 import json
 from urllib.parse import urlencode
@@ -260,17 +260,20 @@ async def assistant(req):
         opts = '<option value="">(no users yet: run the migration first)</option>'
     return page("Assistant", f"""<h1>Assistant</h1><p class="muted">Ask in Italian, as a Brambilla sales rep would. The assistant reads and updates the CRM.</p>
 <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center"><span class="muted">Writing as</span><select id="user" style="min-width:320px">{opts}</select></div>
-<div id="chat"></div><form id="f" class="s" style="margin-top:10px"><input id="m" style="flex:1;min-width:260px" placeholder="e.g. Quanto abbiamo fatturato con Officine Farina nel 2025?"><button>Send</button></form>
+<div id="chat"></div><form id="f" class="s" style="margin-top:10px"><input id="m" style="flex:1;min-width:260px" placeholder="e.g. Quanto abbiamo fatturato con Officine Farina nel 2025?"><button>Send</button><button type="button" id="clr" style="background:#8a8f96">New chat</button></form>
 <script>
-const msgs=[];const chat=document.getElementById('chat');
+let msgs=[];const chat=document.getElementById('chat');
 try{{const u=localStorage.getItem('user');if(u)user.value=u}}catch(e){{}}
 function esc(t){{return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}
-function md(t){{return esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/(^|\n)[-*] /g,'$1• ')}}
+function md(t){{return esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/(^|\\n)[-*] /g,'$1• ')}}
+function save(){{try{{sessionStorage.setItem('chat',JSON.stringify(msgs))}}catch(e){{}}}}
 function add(r,t){{const d=document.createElement('div');d.className='msg '+(r=='user'?'u':'a');if(r=='user')d.textContent=t;else d.innerHTML=md(t);chat.appendChild(d);chat.scrollTop=1e9}}
 f.onsubmit=async ev=>{{ev.preventDefault();const t=m.value.trim();if(!t)return;m.value='';try{{localStorage.setItem('user',user.value)}}catch(e){{}}
 msgs.push({{role:'user',content:t}});add('user',t);add('assistant','…');
 const r=await fetch('/ui/agent',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{context:{{now:new Date().toISOString(),user:user.value}},messages:msgs}})}});
-const j=await r.json().catch(()=>({{reply:'Error '+r.status}}));chat.lastChild.remove();const rep=j.reply||('Error '+r.status);msgs.push({{role:'assistant',content:rep}});add('assistant',rep)}}
+const j=await r.json().catch(()=>({{reply:'Error '+r.status}}));chat.lastChild.remove();const rep=j.reply||('Error '+r.status);msgs.push({{role:'assistant',content:rep}});add('assistant',rep);save()}}
+clr.onclick=()=>{{msgs=[];save();chat.innerHTML=''}};
+try{{msgs=JSON.parse(sessionStorage.getItem('chat')||'[]');msgs.forEach(x=>add(x.role,x.content))}}catch(e){{msgs=[]}}
 </script>""", "assistant")
 
 
