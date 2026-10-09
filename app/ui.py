@@ -264,7 +264,9 @@ async def assistant(req):
 <script>
 const msgs=[];const chat=document.getElementById('chat');
 try{{const u=localStorage.getItem('user');if(u)user.value=u}}catch(e){{}}
-function add(r,t){{const d=document.createElement('div');d.className='msg '+(r=='user'?'u':'a');d.textContent=t;chat.appendChild(d);chat.scrollTop=1e9}}
+function esc(t){{return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}}
+function md(t){{return esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/(^|\n)[-*] /g,'$1• ')}}
+function add(r,t){{const d=document.createElement('div');d.className='msg '+(r=='user'?'u':'a');if(r=='user')d.textContent=t;else d.innerHTML=md(t);chat.appendChild(d);chat.scrollTop=1e9}}
 f.onsubmit=async ev=>{{ev.preventDefault();const t=m.value.trim();if(!t)return;m.value='';try{{localStorage.setItem('user',user.value)}}catch(e){{}}
 msgs.push({{role:'user',content:t}});add('user',t);add('assistant','…');
 const r=await fetch('/ui/agent',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{context:{{now:new Date().toISOString(),user:user.value}},messages:msgs}})}});
