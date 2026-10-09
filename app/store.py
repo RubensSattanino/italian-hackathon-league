@@ -178,8 +178,23 @@ def norm_value(t, name, value, pdef):
         return dt.strftime("%Y-%m-%d")
     if typ == "bool":
         return "true" if s.lower() in ("true", "1", "yes") else "false"
+    if typ == "enumeration" and pdef.get("options"):
+        vals = {str(o.get("value")).lower(): str(o.get("value")) for o in pdef["options"]}
+        parts = [x for x in s.split(";")] if pdef.get("fieldType") == "checkbox" else [s]
+        out = []
+        for x in parts:
+            c = vals.get(x.strip().lower())
+            if c is None:
+                raise ApiError(400, f'Property values were not valid: [{{"isValid":false,"message":"{x} was not one of the allowed options: {list(vals.values())}","error":"INVALID_OPTION","name":"{name}"}}]',
+                               "VALIDATION_ERROR", errors=[{"message": f"{x} was not one of the allowed options", "code": "INVALID_OPTION", "context": {"propertyName": [name]}}])
+            out.append(c)
+        return ";".join(out)
     if name == "email" and t == "contacts":
-        return s.strip().lower()
+        e = s.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", e):
+            raise ApiError(400, f'Property values were not valid: [{{"isValid":false,"message":"Email address {e} is invalid","error":"INVALID_EMAIL","name":"email"}}]',
+                           "VALIDATION_ERROR", errors=[{"message": f"Email address {e} is invalid", "code": "INVALID_EMAIL", "context": {"propertyName": ["email"]}}])
+        return e
     if name == "partita_iva":
         d = re.sub(r"\D", "", s)
         return d or s.strip()
@@ -341,6 +356,7 @@ def _create_locked(t, p, associations=None, ctx=None, skip_hooks=False):
     if t == "contacts":
         p["lastmodifieddate"] = ts
     _defaults_on_create(t, p)
+    validate_pipeline(t, p)
     wconn.execute("INSERT INTO objects(id,type,props,created,updated,archived) VALUES(?,?,?,?,?,0)",
                   (oid, t, json.dumps(p, ensure_ascii=False), created, ts))
     _set_unique(t, oid, None, p)
@@ -384,6 +400,27 @@ def _defaults_on_create(t, p):
             p["amount"] = fmt_num(round(q * pr * (1 - disc / 100.0), 2))
         except ValueError:
             pass
+
+
+def validate_pipeline(t, p):
+    if t == "deals":
+        pk, sk = "pipeline", "dealstage"
+    elif t == "tickets":
+        pk, sk = "hs_pipeline", "hs_pipeline_stage"
+    else:
+        return
+    pl = pipeline_get(t, p.get(pk))
+    if pl is None:
+        pl = pipeline_by_label(t, str(p.get(pk) or ""))
+        if pl is None:
+            raise ApiError(400, f'Property values were not valid: [{{"isValid":false,"message":"{p.get(pk)} is not a valid pipeline","error":"INVALID_OPTION","name":"{pk}"}}]', "VALIDATION_ERROR")
+        p[pk] = pl["id"]
+    st = p.get(sk)
+    if st is not None and not any(s["id"] == st for s in pl["stages"]):
+        s2 = stage_by_label(pl, str(st))
+        if s2 is None:
+            raise ApiError(400, f'Property values were not valid: [{{"isValid":false,"message":"{st} is not a valid stage of pipeline {pl["id"]}","error":"INVALID_OPTION","name":"{sk}"}}]', "VALIDATION_ERROR")
+        p[sk] = s2["id"]
 
 
 def fmt_num(x):
@@ -430,6 +467,8 @@ def _update_locked(t, oid, p, id_property=None, ctx=None):
         else:
             new[k] = v
     _check_unique(t, new, self_id=cur["id"])
+    if any(k in p for k in ("pipeline", "dealstage", "hs_pipeline", "hs_pipeline_stage")):
+        validate_pipeline(t, new)
     ts = now_iso()
     new["hs_lastmodifieddate"] = ts
     if t == "contacts":
@@ -598,7 +637,8 @@ def label_for(tid, cat):
 def to_api(obj, properties=None, associations=None, with_history=False):
     p = obj["props"]
     if properties:
-        props = {k: p.get(k) for k in properties}
+        d = defs(obj["type"])
+        props = {k: p.get(k) for k in properties if k in d or k in p}
         for k in ("hs_object_id", "createdate", "hs_lastmodifieddate"):
             props.setdefault(k, p.get(k))
         if obj["type"] == "contacts":
@@ -631,9 +671,10 @@ def to_api(obj, properties=None, associations=None, with_history=False):
 
 # ---------------------------------------------------------------- search
 SEARCH_DEFAULT = {
-    "contacts": ["firstname", "lastname", "email", "phone", "company", "hs_additional_emails"],
+    "contacts": ["firstname", "lastname", "email", "phone", "company", "hs_additional_emails", "mobilephone"],
     "companies": ["name", "domain", "website", "phone", "hs_additional_domains"],
-    "deals": ["dealname"], "tickets": ["subject", "content"], "products": ["name", "hs_sku", "description"],
+    "deals": ["dealname", "pipeline", "dealstage", "description", "dealtype"], "tickets": ["subject", "content", "hs_pipeline_stage", "hs_ticket_category"],
+    "products": ["name", "hs_sku", "description", "price"],
     "line_items": ["name"], "quotes": ["hs_title"], "notes": ["hs_note_body"], "calls": ["hs_call_title", "hs_call_body"],
     "emails": ["hs_email_subject", "hs_email_text"], "meetings": ["hs_meeting_title", "hs_meeting_body"],
     "tasks": ["hs_task_subject", "hs_task_body"],
@@ -731,6 +772,8 @@ def search(t, body):
     groups = body.get("filterGroups") or []
     if len(groups) > 5:
         raise ApiError(400, "Too many filter groups (max 5)", "VALIDATION_ERROR")
+    if sum(len(g.get("filters") or []) for g in groups) > 18:
+        raise ApiError(400, "Too many filters (max 18 in total)", "VALIDATION_ERROR")
     gsql = []
     for g in groups:
         fl = g.get("filters") or []
@@ -781,6 +824,8 @@ def search(t, body):
         offset = int(body.get("after") or 0)
     except (TypeError, ValueError):
         offset = 0
+    if offset >= 10000:
+        raise ApiError(400, "Paging beyond 10,000 results is not supported", "VALIDATION_ERROR")
     wsql = " AND ".join(where)
     c = rconn()
     total = c.execute(f"SELECT count(*) FROM objects o WHERE {wsql}", args).fetchone()[0]

@@ -792,7 +792,12 @@ def _list_size(l):
 
 def _list_out(l):
     l = dict(l)
-    l["size"] = _list_size(l)
+    n = _list_size(l)
+    l["size"] = n
+    ap = dict(l.get("additionalProperties") or {})
+    ap["hs_list_size"] = str(n)
+    ap.setdefault("hs_list_reference_count", "0")
+    l["additionalProperties"] = ap
     return l
 
 
@@ -845,6 +850,30 @@ def _branch_to_groups(fb):
         return groups
     except Exception:
         return None
+
+
+def _memberships_of(rid):
+    out = []
+    for lid, ts_ in store.rconn().execute("SELECT list_id, ts FROM list_members WHERE obj_id=?", (int(rid),)):
+        out.append({"listId": str(lid), "listVersion": 1, "isPublicList": True, "firstAddedTimestamp": ts_, "lastAddedTimestamp": ts_})
+    for (js,) in store.rconn().execute("SELECT json FROM lists"):
+        l = json.loads(js)
+        if l.get("processingType") == "DYNAMIC" and l.get("filterBranch") and int(rid) in _dynamic_members(l):
+            out.append({"listId": l["listId"], "listVersion": 1, "isPublicList": True, "firstAddedTimestamp": l["updatedAt"], "lastAddedTimestamp": l["updatedAt"]})
+    return out
+
+
+@handler
+def record_memberships(request, body):
+    return {"results": _memberships_of(request.path_params["rid"])}
+
+
+@handler
+def record_memberships_batch(request, body):
+    res = []
+    for inp in (body or {}).get("inputs") or []:
+        res.append({"objectTypeId": inp.get("objectTypeId"), "recordId": str(inp.get("recordId")), "listMemberships": _memberships_of(inp.get("recordId"))})
+    return {"results": res}
 
 
 @handler
@@ -1119,6 +1148,7 @@ def imports_list(request, body):
 @handler
 def do_reset(request, body):
     store.reset()
+    reset_rate_limits()
     return None
 
 
@@ -1194,6 +1224,8 @@ def routes():
         Route("/crm/v3/lists/", lists_get_many, methods=["GET"]),
         Route("/crm/v3/lists/search", lists_search, methods=["POST"]),
         Route("/crm/v3/lists/object-type-id/{otid}/name/{name}", list_by_name, methods=["GET"]),
+        Route("/crm/v3/lists/records/{otid}/{rid}/memberships", record_memberships, methods=["GET"]),
+        Route("/crm/v3/lists/records/memberships/batch/read", record_memberships_batch, methods=["POST"]),
         Route("/crm/v3/lists/{lid}", list_one, methods=["GET", "DELETE"]),
         Route("/crm/v3/lists/{lid}/update-list-name", list_update_name, methods=["PUT"]),
         Route("/crm/v3/lists/{lid}/memberships", list_members, methods=["GET"]),
@@ -1211,13 +1243,43 @@ def routes():
     return r
 
 
+import re as _re
+_VER = _re.compile(r"^/crm/([a-z\-]+)/(\d{4}-\d{2}(?:-[a-z]+)?)(/.*)?$")
+
+
+def rewrite_path(path):
+    m = _VER.match(path)
+    if not m:
+        return path
+    module, _, rest = m.group(1), m.group(2), m.group(3) or ""
+    if module == "objects":
+        parts = rest.strip("/").split("/")
+        if len(parts) >= 4 and parts[2] == "associations":
+            if len(parts) == 6 and parts[3] != "default":
+                return "/crm/v3/objects" + rest
+            return "/crm/v4/objects" + rest
+        return "/crm/v3/objects" + rest
+    if module == "associations":
+        return "/crm/v4/associations" + rest
+    return f"/crm/v3/{module}" + rest
+
+
+RL = {"window": 0, "count": 0, "daily": 0}
+
+
+def reset_rate_limits():
+    RL.update(window=0, count=0, daily=0)
+
+
 class AuthMiddleware:
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
-            path = scope["path"]
+            path = rewrite_path(scope["path"])
+            if path != scope["path"]:
+                scope = dict(scope, path=path, raw_path=path.encode())
             if path.startswith("/crm/") or path.startswith("/__") or path.startswith("/api/"):
                 if TOKENS:
                     headers = dict(scope.get("headers") or [])
@@ -1233,4 +1295,21 @@ class AuthMiddleware:
                         resp = J(body, 401)
                         await resp(scope, receive, send)
                         return
+        if scope["type"] == "http" and (scope["path"].startswith("/crm/")):
+            now = int(time.time() / 10)
+            if RL["window"] != now:
+                RL["window"], RL["count"] = now, 0
+            RL["count"] += 1
+            RL["daily"] += 1
+            hdrs = [(b"x-hubspot-ratelimit-daily", b"1000000"), (b"x-hubspot-ratelimit-daily-remaining", str(max(0, 1000000 - RL["daily"])).encode()),
+                    (b"x-hubspot-ratelimit-interval-milliseconds", b"10000"), (b"x-hubspot-ratelimit-max", b"190"),
+                    (b"x-hubspot-ratelimit-remaining", str(max(0, 190 - RL["count"])).encode()),
+                    (b"x-hubspot-ratelimit-secondly", b"19"), (b"x-hubspot-ratelimit-secondly-remaining", b"19")]
+
+            async def send2(msg):
+                if msg["type"] == "http.response.start":
+                    msg = dict(msg, headers=list(msg.get("headers") or []) + hdrs)
+                await send(msg)
+            await self.app(scope, receive, send2)
+            return
         await self.app(scope, receive, send)
