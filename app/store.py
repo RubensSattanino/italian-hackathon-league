@@ -836,6 +836,55 @@ def search(t, body):
     return total, objs, (str(nxt) if nxt < total else None)
 
 
+def _build_where(t, body):
+    """Same filtering as search(), returned as (sql, args) for aggregates."""
+    body = body or {}
+    args = [t]
+    where = ["o.type=?", "o.archived=0"]
+    gsql = []
+    for g in body.get("filterGroups") or []:
+        parts = [_filter_sql(t, f, args) for f in g.get("filters") or []]
+        if parts:
+            gsql.append("(" + " AND ".join(parts) + ")")
+    if gsql:
+        where.append("(" + " OR ".join(gsql) + ")")
+    q = body.get("query")
+    if q:
+        cols = SEARCH_DEFAULT.get(t, ["name"])
+        ors = []
+        for token in str(q).split():
+            ors_t = []
+            for ccol in cols:
+                ors_t.append(f"{_jx(ccol)} LIKE ?")
+                args.append(f"%{token.replace('*', '')}%")
+            ors.append("(" + " OR ".join(ors_t) + ")")
+        if ors:
+            where.append("(" + " AND ".join(ors) + ")")
+    if body.get("ids") is not None:
+        ids = [int(i) for i in body["ids"]] or [-1]
+        where.append(f"o.id IN ({','.join('?' * len(ids))})")
+        args.extend(ids)
+    return " AND ".join(where), args
+
+
+def aggregate(t, body, sum_prop=None, group_by=None):
+    wsql, args = _build_where(t, body)
+    c = rconn()
+    if t == "deals" and sum_prop == "amount":
+        sx = ("CAST(json_extract(o.props,'$.amount') AS REAL) * CASE upper(coalesce(json_extract(o.props,'$.deal_currency_code'),'EUR')) "
+              "WHEN 'USD' THEN 0.92 WHEN 'GBP' THEN 1.17 ELSE 1.0 END")
+    elif sum_prop:
+        sx = f"CAST({_jx(sum_prop)} AS REAL)"
+    else:
+        sx = "0"
+    if group_by:
+        gx = _jx(group_by)
+        rows = c.execute(f"SELECT {gx}, count(*), sum({sx}) FROM objects o WHERE {wsql} GROUP BY 1 ORDER BY 2 DESC LIMIT 50", args).fetchall()
+        return [{"value": r[0], "count": r[1], "sum": round(r[2] or 0, 2) if sum_prop else None} for r in rows]
+    n, total = c.execute(f"SELECT count(*), sum({sx}) FROM objects o WHERE {wsql}", args).fetchone()
+    return {"count": n, "sum": round(total or 0, 2) if sum_prop else None}
+
+
 def list_objects(t, limit=10, after=None, archived=False):
     try:
         after = int(after) if after else 0

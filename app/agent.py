@@ -31,6 +31,7 @@ Come lavori:
 - Quando segni una trattativa come vinta o persa, imposta anche closedate a oggi se la richiesta non indica un'altra data.
 - Pipeline trattative: Vendite = "default" (fasi: appointmentscheduled=Contatto, qualifiedtobuy=Qualifica, presentationscheduled=Presentazione, decisionmakerboughtin=Decisione, contractsent=Contratto, closedwon=Vinta, closedlost=Persa); Rinnovi (fasi Da rinnovare, In trattativa, Rinnovato, Non rinnovato: usa list_pipelines per gli id). Ticket: pipeline Assistenza (Aperto, In lavorazione, In attesa del cliente, Chiuso); priorità LOW/MEDIUM/HIGH/URGENT.
 - Proprietà utili: companies(name, domain, city, state, partita_iva, fatturato_2025, classe_cliente A/B/C), contacts(firstname, lastname, email, phone, lifecyclestage: lead/opportunity/customer/other), deals(dealname, amount, deal_currency_code, pipeline, dealstage, closedate, commerciale), tickets(subject, content, hs_pipeline, hs_pipeline_stage, hs_ticket_priority, assegnatario), tasks(hs_task_subject, hs_task_body, hs_timestamp=scadenza, hs_task_status NOT_STARTED/COMPLETED, hs_task_priority), notes(hs_note_body, hs_timestamp), calls(hs_call_body, hs_timestamp), meetings(hs_meeting_title, hs_meeting_body, hs_timestamp), products(name, hs_sku BF-00000, price), line_items(name, quantity, price, hs_discount_percentage, hs_product_id).
+- Per conteggi e totali ("quanti", "totale", "somma") usa aggregate o i totali di my_companies: non sommare a mano liste parziali.
 - Fatturato: fatturato_2025 dell'azienda è già calcolato (trattative vinte 2025 meno storni, in EUR). Per altri anni o dettagli usa lo strumento revenue.
 - Per attività (note, chiamate, task, riunioni) registrate da chi scrive: imposta hs_timestamp (ora se non indicato), autore={user} sulle note/chiamate/email/riunioni, hubspot_owner_id dell'utente se lo conosci, e associale al contatto/azienda/trattativa giusti.
 - Allegati CSV: leggili con read_attachment; per aggiornare il listino usa apply_price_list.
@@ -266,7 +267,57 @@ def t_revenue(a, ctx):
     return {"company_id": cid, "year": year, "revenue_eur": round(tot + 1e-9, 2), "won_deals": deals[:40], "n_deals": len(deals)}
 
 
+def t_aggregate(a, ctx):
+    t = schema.norm_type(a.get("object_type"))
+    if not t:
+        return {"error": "object_type non valido"}
+    filters = []
+    for f in a.get("filters") or []:
+        ff = {"propertyName": f.get("property") or f.get("propertyName"), "operator": (f.get("operator") or "EQ").upper()}
+        for k in ("value", "values", "highValue"):
+            if k in f:
+                ff[k] = f[k]
+        filters.append(ff)
+    body = {}
+    if filters:
+        body["filterGroups"] = [{"filters": filters}]
+    if a.get("query"):
+        body["query"] = a["query"]
+    if a.get("only_my_companies") and t == "companies":
+        body["ids"] = _my_company_ids(a.get("user_email") or ctx["user"])
+    res = store.aggregate(t, body, a.get("sum_property"), a.get("group_by"))
+    if t == "deals" and a.get("sum_property") == "amount":
+        return {"result": res, "note": "somma convertita in EUR (USD 0,92; GBP 1,17)"}
+    return {"result": res}
+
+
+def _my_company_ids(email):
+    email = (email or "").lower()
+    c = store.rconn()
+    ids = set()
+    for (did,) in c.execute("SELECT id FROM objects WHERE type='deals' AND archived=0 AND lower(json_extract(props,'$.commerciale'))=?", (email,)):
+        for cid, _ in store.get_assocs(did, "companies"):
+            ids.add(cid)
+    for (tid,) in c.execute("SELECT id FROM objects WHERE type='tickets' AND archived=0 AND lower(json_extract(props,'$.assegnatario'))=?", (email,)):
+        for cid, _ in store.get_assocs(tid, "companies"):
+            ids.add(cid)
+    return sorted(ids)
+
+
 def t_my_companies(a, ctx):
+    email = (a.get("user_email") or ctx["user"]).lower()
+    ids = _my_company_ids(email)
+    objs = [o for o in (store.get_obj("companies", i) for i in ids) if o]
+    tot = round(sum(float(o["props"].get("fatturato_2025") or 0) for o in objs) + 1e-9, 2)
+    classes = {k: sum(1 for o in objs if o["props"].get("classe_cliente") == k) for k in "ABC"}
+    objs.sort(key=lambda o: float(o["props"].get("fatturato_2025") or 0), reverse=True)
+    lim = int(a.get("limit") or 40)
+    return {"utente": email, "numero_aziende": len(objs), "fatturato_2025_totale_eur": tot, "aziende_per_classe": classes,
+            "aziende_ordinate_per_fatturato_2025": [_props_brief(o, ["name", "city", "fatturato_2025", "classe_cliente"]) for o in objs[:lim]],
+            "nota": "elenco troncato ai primi %d per fatturato" % lim if len(objs) > lim else ""}
+
+
+def _unused_old_my_companies(a, ctx):
     email = (a.get("user_email") or ctx["user"]).lower()
     c = store.rconn()
     ids = set()
@@ -387,8 +438,11 @@ TOOLS = {
     "list_users": (t_users, "Utenti del CRM (commerciali) con email, nome, attivo.", {}, []),
     "revenue": (t_revenue, "Fatturato vinto (EUR) di un'azienda in un anno, con le trattative vinte (Vinta/Rinnovato) chiuse quell'anno, storni inclusi.",
                 {"company_id": {"type": "string"}, "year": {"type": "integer"}}, ["company_id", "year"]),
-    "my_companies": (t_my_companies, "Aziende seguite da un utente (trattative con commerciale=utente o ticket con assegnatario=utente). Default: chi scrive.",
+    "my_companies": (t_my_companies, "Aziende seguite da un utente (trattative con commerciale=utente o ticket con assegnatario=utente), con numero totale, fatturato 2025 totale e conteggio per classe già calcolati, ordinate per fatturato. Default: chi scrive.",
                      {"user_email": {"type": "string"}, "limit": {"type": "integer"}}, []),
+    "aggregate": (t_aggregate, "Conteggi e totali esatti su TUTTI i record che rispettano i filtri (non solo una pagina): count, somma di una proprietà numerica (sum_property, es. amount per deals in EUR, fatturato_2025 per companies), raggruppamento (group_by, es. dealstage, classe_cliente, commerciale). only_my_companies=true limita le aziende a quelle seguite dall'utente. Usalo per domande 'quanti', 'totale', 'somma'.",
+                  {"object_type": {"type": "string"}, "filters": {"type": "array", "items": {"type": "object"}}, "query": {"type": "string"},
+                   "sum_property": {"type": "string"}, "group_by": {"type": "string"}, "only_my_companies": {"type": "boolean"}, "user_email": {"type": "string"}}, ["object_type"]),
     "dormant_customers": (t_dormant, "Lista 'Clienti dormienti' (aziende con trattative vinte e nessuna attività nel 2025).", {}, []),
     "read_attachment": (t_read_attachment, "Legge le righe di un allegato CSV del messaggio.", {"name": {"type": "string"}, "offset": {"type": "integer"}}, []),
     "apply_price_list": (t_apply_price_list, "Applica un listino CSV allegato ai prodotti: aggiorna prezzo/descrizione per codice (hs_sku), crea gli articoli nuovi.", {"name": {"type": "string"}}, []),
